@@ -1,0 +1,163 @@
+{
+    "_metadata": {
+        "description": "Example ProteinMPNN experiment configs for ovalbumin k-mer coverage exploration",
+        "target": "AF-P01012-F1-model_v6.pdb",
+        "sequences_per_condition": 100000,
+        "total_sequences": 1200000,
+        "total_experiments": 12,
+        "created": "2026-03-05",
+        "notes": [
+            "batch_size=50 is comfortable for H100 80GB with 387-residue protein",
+            "number_of_batches=2000 gives exactly 100,000 sequences per condition",
+            "Backbone PDB output is deleted after each successful run (we only need seqs)",
+            "All conditions use protein_mpnn",
+            "3 noise levels x 2 temperatures x 2 Asn biases = 12 conditions"
+        ]
+    },
+    "experiments": [
+        {
+            "group": "baseline",
+            "id": "N10_T02",
+            "model_type": "protein_mpnn",
+            "noise": "0.10",
+            "temperature": 0.2,
+            "bias_AA": "",
+            "number_of_batches": 2000,
+            "batch_size": 50,
+            "seed": 1001,
+            "notes": "Noise 0.10, moderate temperature, no bias"
+        },
+        {
+            "group": "baseline",
+            "id": "N10_T03",
+            "model_type": "protein_mpnn",
+            "noise": "0.10",
+            "temperature": 0.3,
+            "bias_AA": "",
+            "number_of_batches": 2000,
+            "batch_size": 50,
+            "seed": 1002,
+            "notes": "Noise 0.10, higher temperature, more sequence diversity"
+        },
+        {
+            "group": "baseline",
+            "id": "N20_T02",
+            "model_type": "protein_mpnn",
+            "noise": "0.20",
+            "temperature": 0.2,
+            "bias_AA": "",
+            "number_of_batches": 2000,
+            "batch_size": 50,
+            "seed": 1003,
+            "notes": "Noise 0.20 (default), moderate temp, most standard setting"
+        },
+        {
+            "group": "baseline",
+            "id": "N20_T03",
+            "model_type": "protein_mpnn",
+            "noise": "0.20",
+            "temperature": 0.3,
+            "bias_AA": "",
+            "number_of_batches": 2000,
+            "batch_size": 50,
+            "seed": 1004,
+            "notes": "Noise 0.20, higher temperature, more diversity at default noise"
+        },
+        {
+            "group": "baseline",
+            "id": "N30_T02",
+            "model_type": "protein_mpnn",
+            "noise": "0.30",
+            "temperature": 0.2,
+            "bias_AA": "",
+            "number_of_batches": 2000,
+            "batch_size": 50,
+            "seed": 1005,
+            "notes": "Noise 0.30, moderate temp, most forgiving of AF2 backbone imprecision"
+        },
+        {
+            "group": "baseline",
+            "id": "N30_T03",
+            "model_type": "protein_mpnn",
+            "noise": "0.30",
+            "temperature": 0.3,
+            "bias_AA": "",
+            "number_of_batches": 2000,
+            "batch_size": 50,
+            "seed": 1006,
+            "notes": "Noise 0.30, higher temp, maximum forgiveness + diversity"
+        },
+        {
+            "group": "asn_bias",
+            "id": "N10_T02_N30",
+            "model_type": "protein_mpnn",
+            "noise": "0.10",
+            "temperature": 0.2,
+            "bias_AA": "N:3.0",
+            "number_of_batches": 2000,
+            "batch_size": 50,
+            "seed": 2001,
+            "notes": "Noise 0.10, moderate temp, Asn bias +3.0"
+        },
+        {
+            "group": "asn_bias",
+            "id": "N10_T03_N30",
+            "model_type": "protein_mpnn",
+            "noise": "0.10",
+            "temperature": 0.3,
+            "bias_AA": "N:3.0",
+            "number_of_batches": 2000,
+            "batch_size": 50,
+            "seed": 2002,
+            "notes": "Noise 0.10, higher temp, Asn bias, more diversity with Asn enrichment"
+        },
+        {
+            "group": "asn_bias",
+            "id": "N20_T02_N30",
+            "model_type": "protein_mpnn",
+            "noise": "0.20",
+            "temperature": 0.2,
+            "bias_AA": "N:3.0",
+            "number_of_batches": 2000,
+            "batch_size": 50,
+            "seed": 2003,
+            "notes": "Default noise, moderate temp, Asn bias, expected best compromise"
+        },
+        {
+            "group": "asn_bias",
+            "id": "N20_T03_N30",
+            "model_type": "protein_mpnn",
+            "noise": "0.20",
+            "temperature": 0.3,
+            "bias_AA": "N:3.0",
+            "number_of_batches": 2000,
+            "batch_size": 50,
+            "seed": 2004,
+            "notes": "Default noise, higher temp, Asn bias, more diversity with Asn"
+        },
+        {
+            "group": "asn_bias",
+            "id": "N30_T02_N30",
+            "model_type": "protein_mpnn",
+            "noise": "0.30",
+            "temperature": 0.2,
+            "bias_AA": "N:3.0",
+            "number_of_batches": 2000,
+            "batch_size": 50,
+            "seed": 2005,
+            "notes": "High noise, moderate temp, Asn bias, most forgiving + Asn enriched"
+        },
+        {
+            "group": "asn_bias",
+            "id": "N30_T03_N30",
+            "model_type": "protein_mpnn",
+            "noise": "0.30",
+            "temperature": 0.3,
+            "bias_AA": "N:3.0",
+            "number_of_batches": 2000,
+            "batch_size": 50,
+            "seed": 2006,
+            "notes": "High noise, high temp, Asn bias, maximum exploration"
+        }
+    ]
+}
