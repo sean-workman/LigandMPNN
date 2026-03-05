@@ -14,12 +14,15 @@ module load StdEnv/2023 gcc cuda/12.2 cudnn python/3.11
 
 source ~/envs/ligandmpnn/bin/activate
 
-# --- FILL IN BELOW ---
+# --- PATHS ---
+
+LIGANDMPNN_DIR="$HOME/software/LigandMPNN"
 
 INPUT_PDB=""          # path to input PDB file
 OUTPUT_DIR=""         # path to output directory
-MODEL_TYPE=""         # e.g. ligand_mpnn, soluble_mpnn, etc.
-CHECKPOINT=""         # path to model checkpoint
+
+# Model checkpoint (see $LIGANDMPNN_DIR/model_params/ for available weights)
+CHECKPOINT="$LIGANDMPNN_DIR/model_params/proteinmpnn_v_48_002.pt"
 
 # Optional parameters (uncomment and set as needed)
 # CHAINS=""           # chains to design, e.g. "A B"
@@ -30,13 +33,11 @@ CHECKPOINT=""         # path to model checkpoint
 
 # --- RUN ---
 
-python run.py \
+python "$LIGANDMPNN_DIR/run.py" \
     --pdb_path "$INPUT_PDB" \
     --out_folder "$OUTPUT_DIR" \
-    --model_type "$MODEL_TYPE" \
-    --checkpoint_path "$CHECKPOINT" \
-    # --chains_to_design "$CHAINS" \
-    # --fixed_residues "$FIXED_RESIDUES" \
-    # --number_of_batches "$NUM_SEQS" \
-    # --seed "$SEED" \
-    # --temperature "$TEMPERATURE"
+    --checkpoint_protein_mpnn "$CHECKPOINT"
+    # To add optional flags, remove the comment and add a backslash (\)
+    # to the end of the PREVIOUS line. For example:
+    #   --checkpoint_protein_mpnn "$CHECKPOINT" \
+    #   --chains_to_design "$CHAINS"
