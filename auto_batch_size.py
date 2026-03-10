@@ -47,7 +47,7 @@ def get_gpu_memory_info(device: torch.device) -> dict:
     if device.type != "cuda":
         return {"total": 0, "allocated": 0, "reserved": 0, "free": 0}
 
-    total = torch.cuda.get_device_properties(device).total_mem
+    total = torch.cuda.get_device_properties(device).total_memory
     allocated = torch.cuda.memory_allocated(device)
     reserved = torch.cuda.memory_reserved(device)
     free = total - reserved
