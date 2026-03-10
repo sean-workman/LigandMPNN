@@ -69,7 +69,7 @@ import time
 from datetime import datetime, timedelta
 
 # ── Defaults ────────────────────────────────────────────────────────────────
-DEFAULT_LIGANDMPNN_DIR = os.path.join(os.environ.get("HOME", "~"), "software", "LigandMPNN")
+DEFAULT_LIGANDMPNN_DIR = os.path.dirname(os.path.abspath(__file__))
 
 # Checkpoint flag for each model type (as expected by run.py)
 CHECKPOINT_FLAG = {
