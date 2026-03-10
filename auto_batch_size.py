@@ -246,7 +246,8 @@ def calibrate_batch_size(
 
     # Measure actual free memory before we load anything, to account for
     # CUDA context overhead and other processes using the GPU.
-    free_before_load, _ = torch.cuda.mem_get_info(device)
+    device_index = device.index if device.index is not None else 0
+    free_before_load, _ = torch.cuda.mem_get_info(device_index)
 
     if verbose:
         print(f"GPU: {gpu_name} ({_bytes_to_gb(gpu_total):.1f} GB)")
