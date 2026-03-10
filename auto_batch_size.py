@@ -150,7 +150,13 @@ def load_model_and_protein(
 
 
 def _run_trial(model, feature_dict, batch_size: int, device: torch.device):
-    """Run a single trial sample and return peak GPU memory allocated."""
+    """Run a single trial sample and return peak GPU memory reserved.
+
+    Uses max_memory_reserved (not max_memory_allocated) because PyTorch's
+    caching allocator reserves more memory than is actively allocated.
+    The reserved amount is what actually occupies GPU VRAM.
+    """
+    torch.cuda.empty_cache()
     torch.cuda.reset_peak_memory_stats(device)
     torch.cuda.synchronize(device)
 
@@ -162,7 +168,7 @@ def _run_trial(model, feature_dict, batch_size: int, device: torch.device):
         _ = model.sample(feature_dict)
 
     torch.cuda.synchronize(device)
-    peak = torch.cuda.max_memory_allocated(device)
+    peak = torch.cuda.max_memory_reserved(device)
 
     # Clean up
     del feature_dict["randn"]
@@ -238,8 +244,15 @@ def calibrate_batch_size(
     gpu_name = gpu_info["device_name"]
     gpu_total = gpu_info["total"]
 
+    # Measure actual free memory before we load anything, to account for
+    # CUDA context overhead and other processes using the GPU.
+    free_before_load, _ = torch.cuda.mem_get_info(device)
+
     if verbose:
         print(f"GPU: {gpu_name} ({_bytes_to_gb(gpu_total):.1f} GB)")
+        other_usage = gpu_total - free_before_load
+        if other_usage > 100 * 1024 * 1024:  # >100 MB
+            print(f"  Non-PyTorch / other-process overhead: {_bytes_to_mb(other_usage):.0f} MB")
         print(f"Loading model and protein...")
 
     # Load model and protein
@@ -284,15 +297,17 @@ def calibrate_batch_size(
         # Fall back to a conservative estimate: assume B=2 memory / 3
         per_sample = mem_b2 // 3
 
-    # Calculate optimal batch size
-    target_memory = int(gpu_total * memory_fraction)
+    # Calculate optimal batch size.
+    # Use free_before_load (not gpu_total) as the budget base, so we don't
+    # plan to use memory already taken by other processes or the CUDA context.
+    target_memory = int(free_before_load * memory_fraction)
     available_for_batches = target_memory - mem_b1 + per_sample  # B=1 already includes one sample
     optimal_batch_size = max(min_batch_size, int(available_for_batches / per_sample))
     optimal_batch_size = min(optimal_batch_size, max_batch_size)
 
     if verbose:
         print(f"\nTarget memory budget: {_bytes_to_mb(target_memory):.0f} MB "
-              f"({memory_fraction:.0%} of {_bytes_to_gb(gpu_total):.1f} GB)")
+              f"({memory_fraction:.0%} of {_bytes_to_gb(free_before_load):.1f} GB available)")
         print(f"Estimated optimal batch_size: {optimal_batch_size}")
 
     # Validate with actual run at computed batch size
@@ -353,6 +368,7 @@ def calibrate_batch_size(
         "batch_size": optimal_batch_size,
         "gpu_name": gpu_name,
         "gpu_total_mb": round(_bytes_to_mb(gpu_total), 1),
+        "gpu_available_mb": round(_bytes_to_mb(free_before_load), 1),
         "protein_length": L,
         "k_neighbors": k_neighbors,
         "base_memory_mb": round(_bytes_to_mb(mem_b1), 1),
