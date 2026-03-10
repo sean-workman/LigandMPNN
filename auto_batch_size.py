@@ -124,6 +124,10 @@ def load_model_and_protein(
         parse_atoms_with_zero_occupancy=False,
     )
 
+    # Build chain_mask (run.py does this before featurize; marks all residues as designable)
+    n_residues = len(protein_dict["chain_letters"])
+    protein_dict["chain_mask"] = torch.ones(n_residues, device=device, dtype=torch.int32)
+
     # Featurize
     feature_dict = featurize(
         protein_dict,
