@@ -20,6 +20,9 @@ Features:
   - Group/ID filtering: run only specific groups (e.g., --groups A B) or
     specific experiment IDs (e.g., --ids A01 A02 B05).
   - Automatic checkpoint resolution from model_type + noise level.
+  - Auto batch size calibration: profiles GPU memory to find the largest
+    batch size that fits, then adjusts number_of_batches to maintain the
+    target sequence count.
 
 Usage (inside a SLURM job or interactive session on Fir):
     module load StdEnv/2023 gcc cuda/12.2 cudnn python/3.11
@@ -29,6 +32,12 @@ Usage (inside a SLURM job or interactive session on Fir):
         --config experiment_configs.json \\
         --pdb /path/to/structure.pdb \\
         --output_base ./mpnn_outputs
+
+    # Auto-optimize batch size for your GPU:
+    python run_mpnn_sweep.py \\
+        --config experiment_configs.json \\
+        --pdb /path/to/structure.pdb \\
+        --auto_batch_size
 
     # Dry run:
     python run_mpnn_sweep.py \\
@@ -51,6 +60,7 @@ import argparse
 import glob
 import json
 import logging
+import math
 import os
 import shutil
 import subprocess
@@ -377,6 +387,12 @@ Examples:
 
   # Keep backbone PDB files:
   python run_mpnn_sweep.py --config experiment_configs.json --pdb ./structure.pdb --keep_backbones
+
+  # Auto-optimize batch size (profiles GPU, adjusts batches to keep same total seqs):
+  python run_mpnn_sweep.py --config experiment_configs.json --pdb ./structure.pdb --auto_batch_size
+
+  # Auto batch size with custom memory fraction:
+  python run_mpnn_sweep.py --config experiment_configs.json --pdb ./structure.pdb --auto_batch_size --memory_fraction 0.80
         """,
     )
     parser.add_argument(
@@ -406,6 +422,17 @@ Examples:
     parser.add_argument(
         "--keep_backbones", action="store_true",
         help="Keep backbone PDB files instead of cleaning them up after each run.",
+    )
+    parser.add_argument(
+        "--auto_batch_size", action="store_true",
+        help="Auto-calibrate batch size by profiling GPU memory. "
+             "Overrides batch_size in all experiments and adjusts "
+             "number_of_batches to maintain the same total sequence count.",
+    )
+    parser.add_argument(
+        "--memory_fraction", type=float, default=0.85,
+        help="Fraction of GPU memory to target when using --auto_batch_size "
+             "(default: 0.85). Lower values are safer for long runs.",
     )
     parser.add_argument(
         "--ligandmpnn_dir", default=DEFAULT_LIGANDMPNN_DIR,
@@ -472,6 +499,57 @@ Examples:
             )
             sys.exit(1)
 
+    # Auto batch size calibration
+    auto_bs_result = None
+    if args.auto_batch_size and not args.dry_run:
+        # Add LigandMPNN dir to path so auto_batch_size can import its modules
+        if ligandmpnn_dir not in sys.path:
+            sys.path.insert(0, ligandmpnn_dir)
+
+        from auto_batch_size import calibrate_batch_size
+
+        # Use the first experiment's model_type/noise for calibration
+        # (the model architecture is the same across noise levels, and
+        # protein_mpnn vs soluble_mpnn have the same memory footprint)
+        first_exp = experiments[0]
+        cal_checkpoint = resolve_checkpoint(
+            first_exp["model_type"], first_exp["noise"], model_params_dir
+        )
+
+        logger.info("=" * 70)
+        logger.info("Auto batch size calibration")
+        logger.info(f"  Memory target: {args.memory_fraction:.0%} of GPU VRAM")
+
+        auto_bs_result = calibrate_batch_size(
+            pdb_path=os.path.abspath(args.pdb),
+            checkpoint_path=cal_checkpoint,
+            model_type=first_exp["model_type"],
+            memory_fraction=args.memory_fraction,
+            verbose=True,
+        )
+        optimal_bs = auto_bs_result["batch_size"]
+
+        logger.info(f"  Calibrated batch_size: {optimal_bs}")
+        logger.info(f"  GPU: {auto_bs_result['gpu_name']}")
+        logger.info(f"  Protein: {auto_bs_result['protein_length']} residues")
+        logger.info(f"  Base memory: {auto_bs_result['base_memory_mb']:.0f} MB")
+        logger.info(f"  Per-sample: {auto_bs_result['per_sample_mb']:.1f} MB")
+
+        # Override batch_size in all experiments, adjusting number_of_batches
+        # to maintain the same total sequence count
+        for exp in experiments:
+            target_seqs = exp["batch_size"] * exp["number_of_batches"]
+            exp["batch_size"] = optimal_bs
+            exp["number_of_batches"] = math.ceil(target_seqs / optimal_bs)
+            actual_seqs = exp["batch_size"] * exp["number_of_batches"]
+            if actual_seqs != target_seqs:
+                logger.info(
+                    f"  [{exp['id']}] {target_seqs:,} -> {actual_seqs:,} seqs "
+                    f"(batch_size={optimal_bs}, batches={exp['number_of_batches']})"
+                )
+
+        logger.info("=" * 70)
+
     # Compute totals for progress reporting
     total_seqs = sum(e["batch_size"] * e["number_of_batches"] for e in experiments)
     total_exps = len(experiments)
@@ -484,6 +562,8 @@ Examples:
     logger.info(f"  LigandMPNN:   {ligandmpnn_dir}")
     logger.info(f"  Experiments:  {total_exps}")
     logger.info(f"  Total seqs:   {total_seqs:,}")
+    if auto_bs_result:
+        logger.info(f"  Batch size:   {auto_bs_result['batch_size']} (auto-calibrated)")
     logger.info(f"  Dry run:      {args.dry_run}")
     logger.info("=" * 70)
 
@@ -543,6 +623,7 @@ Examples:
             "remaining": total_exps - (i + 1),
             "total_sequences_generated": completed_seqs,
             "elapsed_s": time.time() - sweep_t0,
+            "auto_batch_size": auto_bs_result,
             "results": all_results,
         }
         if not args.dry_run:

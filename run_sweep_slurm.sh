@@ -25,10 +25,13 @@ python "$LIGANDMPNN_DIR/run_mpnn_sweep.py" \
     --config "$CONFIG" \
     --pdb "$INPUT_PDB" \
     --output_base "$OUTPUT_BASE" \
-    --ligandmpnn_dir "$LIGANDMPNN_DIR"
+    --ligandmpnn_dir "$LIGANDMPNN_DIR" \
+    --auto_batch_size
 
     # Optional flags (uncomment and add backslash to previous line):
     #   --groups baseline          # run only specific groups
     #   --ids N10_T02 N20_T03     # run only specific experiment IDs
     #   --dry_run                  # preview commands without running
     #   --keep_backbones           # don't delete backbone PDB files
+    #   --auto_batch_size          # auto-calibrate batch size for your GPU
+    #   --memory_fraction 0.80     # use 80% of GPU VRAM (default: 85%)
