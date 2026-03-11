@@ -37,6 +37,7 @@ Usage:
 import argparse
 import json
 import sys
+import time
 
 import numpy as np
 import torch
@@ -149,8 +150,10 @@ def load_model_and_protein(
     return model, feature_dict, L, k_neighbors
 
 
-def _run_trial(model, feature_dict, batch_size: int, device: torch.device):
-    """Run a single trial sample and return peak GPU memory reserved.
+def _run_timed_trial(
+    model, feature_dict, batch_size: int, device: torch.device
+) -> dict:
+    """Run a single trial sample, returning peak GPU memory and wall-clock time.
 
     Uses max_memory_reserved (not max_memory_allocated) because PyTorch's
     caching allocator reserves more memory than is actively allocated.
@@ -164,17 +167,169 @@ def _run_trial(model, feature_dict, batch_size: int, device: torch.device):
     L = feature_dict["mask"].shape[1]
     feature_dict["randn"] = torch.randn([batch_size, L], device=device)
 
+    torch.cuda.synchronize(device)
+    t0 = time.perf_counter()
+
     with torch.no_grad():
         _ = model.sample(feature_dict)
 
     torch.cuda.synchronize(device)
+    t1 = time.perf_counter()
+
     peak = torch.cuda.max_memory_reserved(device)
+    elapsed = t1 - t0
 
     # Clean up
     del feature_dict["randn"]
     torch.cuda.empty_cache()
 
-    return peak
+    return {
+        "batch_size": batch_size,
+        "elapsed_s": round(elapsed, 3),
+        "peak_memory": peak,
+        "peak_memory_mb": round(_bytes_to_mb(peak), 1),
+        "throughput": batch_size / elapsed if elapsed > 0 else 0.0,
+    }
+
+
+def _run_trial(model, feature_dict, batch_size: int, device: torch.device):
+    """Run a single trial sample and return peak GPU memory reserved."""
+    result = _run_timed_trial(model, feature_dict, batch_size, device)
+    return result["peak_memory"]
+
+
+def _find_throughput_optimal(
+    model,
+    feature_dict,
+    memory_max_batch_size: int,
+    device: torch.device,
+    verbose: bool = True,
+) -> dict:
+    """Run a throughput sweep to find the compute-optimal batch size.
+
+    Tests batch sizes at geometric intervals up to memory_max_batch_size,
+    measuring sequences/second at each point. Returns the smallest batch
+    size that achieves >= 90% of peak throughput (the "plateau onset"),
+    which gives near-peak performance with less memory pressure.
+
+    Args:
+        model: Loaded ProteinMPNN model.
+        feature_dict: Featurized protein dict.
+        memory_max_batch_size: Maximum batch size that fits in memory.
+        device: CUDA device.
+        verbose: Print progress.
+
+    Returns:
+        dict with throughput_optimal_batch_size, peak info, and sweep data.
+    """
+    # Build candidate batch sizes: powers of 2 up to memory_max
+    candidates = []
+    b = 1
+    while b < memory_max_batch_size:
+        candidates.append(b)
+        b *= 2
+    # Always include the memory-max as the final test point
+    if not candidates or candidates[-1] != memory_max_batch_size:
+        candidates.append(memory_max_batch_size)
+
+    if memory_max_batch_size <= 2:
+        # Too small for a meaningful sweep
+        return {
+            "throughput_optimal_batch_size": memory_max_batch_size,
+            "peak_throughput_batch_size": memory_max_batch_size,
+            "peak_throughput_seqs_per_sec": 0.0,
+            "sweep_data": [],
+            "sweep_time_s": 0.0,
+        }
+
+    if verbose:
+        print(f"\nThroughput sweep: testing {len(candidates)} batch sizes "
+              f"up to B={memory_max_batch_size}")
+
+    # Warmup trial (discarded) — settles GPU clocks and caches
+    _run_timed_trial(model, feature_dict, candidates[0], device)
+
+    sweep_data = []
+    best_throughput = 0.0
+    declining_count = 0
+    sweep_start = time.perf_counter()
+
+    for b in candidates:
+        try:
+            result = _run_timed_trial(model, feature_dict, b, device)
+        except torch.cuda.OutOfMemoryError:
+            torch.cuda.empty_cache()
+            if verbose:
+                print(f"  B={b:>5d}  OOM — stopping sweep")
+            break
+
+        sweep_data.append(result)
+        tp = result["throughput"]
+
+        if verbose:
+            print(f"  B={b:>5d}  {tp:>7.1f} seq/s  "
+                  f"{result['peak_memory_mb']:>7.0f} MB  "
+                  f"{result['elapsed_s']:>6.1f}s")
+
+        if tp > best_throughput:
+            best_throughput = tp
+            declining_count = 0
+        elif tp < best_throughput * 0.95:
+            declining_count += 1
+        else:
+            declining_count = 0
+
+        # Early stopping: throughput has declined for 2 consecutive doublings
+        if declining_count >= 2:
+            if verbose:
+                print("  Throughput declining — stopping early")
+            break
+
+    sweep_time = time.perf_counter() - sweep_start
+
+    if not sweep_data:
+        return {
+            "throughput_optimal_batch_size": memory_max_batch_size,
+            "peak_throughput_batch_size": memory_max_batch_size,
+            "peak_throughput_seqs_per_sec": 0.0,
+            "sweep_data": [],
+            "sweep_time_s": round(sweep_time, 1),
+        }
+
+    # Find peak throughput
+    peak_entry = max(sweep_data, key=lambda d: d["throughput"])
+    peak_throughput = peak_entry["throughput"]
+    peak_batch_size = peak_entry["batch_size"]
+
+    # Find plateau onset: smallest B achieving >= 90% of peak
+    threshold = peak_throughput * 0.90
+    plateau_onset = peak_batch_size  # fallback
+    for entry in sweep_data:
+        if entry["throughput"] >= threshold:
+            plateau_onset = entry["batch_size"]
+            break
+
+    # If all throughputs are within 5% of each other, recommend the smallest
+    # (saves memory with negligible throughput cost)
+    throughputs = [d["throughput"] for d in sweep_data]
+    if max(throughputs) > 0 and (max(throughputs) - min(throughputs)) / max(throughputs) < 0.05:
+        plateau_onset = sweep_data[0]["batch_size"]
+        if verbose:
+            print(f"  Throughput is flat across all batch sizes — "
+                  f"recommending smallest (B={plateau_onset})")
+
+    if verbose:
+        print(f"  Peak: {peak_throughput:.1f} seq/s at B={peak_batch_size}")
+        print(f"  Plateau onset (90% of peak): B={plateau_onset}")
+        print(f"  Sweep time: {sweep_time:.1f}s")
+
+    return {
+        "throughput_optimal_batch_size": plateau_onset,
+        "peak_throughput_batch_size": peak_batch_size,
+        "peak_throughput_seqs_per_sec": round(peak_throughput, 2),
+        "sweep_data": sweep_data,
+        "sweep_time_s": round(sweep_time, 1),
+    }
 
 
 def calibrate_batch_size(
@@ -190,9 +345,15 @@ def calibrate_batch_size(
     ligand_mpnn_use_side_chain_context: int = 0,
     ligand_mpnn_use_atom_context: int = 1,
     ligand_mpnn_cutoff_for_score: float = 8.0,
+    throughput_profile: bool = False,
 ) -> dict:
     """
     Determine optimal batch size by profiling GPU memory usage.
+
+    When throughput_profile=True, additionally runs a throughput sweep at
+    geometric batch size intervals to find the compute-optimal point where
+    sequences/second peaks. The final batch_size is the throughput-optimal
+    value (capped by memory limits).
 
     Args:
         pdb_path: Path to input PDB file.
@@ -202,11 +363,14 @@ def calibrate_batch_size(
         min_batch_size: Minimum batch size to return.
         max_batch_size: Maximum batch size to return.
         validate: If True, run a validation pass at the computed batch size.
+            Skipped when throughput_profile=True (the sweep validates implicitly).
         verbose: Print progress information.
         device: Torch device (auto-detected if None).
         ligand_mpnn_use_side_chain_context: Use side chain context (ligand_mpnn only).
         ligand_mpnn_use_atom_context: Use atom context (ligand_mpnn only).
         ligand_mpnn_cutoff_for_score: Cutoff distance for scoring.
+        throughput_profile: If True, run throughput sweep to find compute-optimal
+            batch size instead of just maximizing memory utilization.
 
     Returns:
         dict with keys:
@@ -220,6 +384,8 @@ def calibrate_batch_size(
             target_memory_mb: Target memory budget in MB.
             memory_fraction: Fraction used.
             validated: Whether the batch size was validated.
+            memory_max_batch_size: (throughput_profile only) Max batch size from memory.
+            throughput: (throughput_profile only) Throughput sweep results dict.
     """
     if device is None:
         device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
@@ -311,9 +477,24 @@ def calibrate_batch_size(
               f"({memory_fraction:.0%} of {_bytes_to_gb(free_before_load):.1f} GB available)")
         print(f"Estimated optimal batch_size: {optimal_batch_size}")
 
-    # Validate with actual run at computed batch size
+    # Throughput profiling replaces validation — it tests multiple batch sizes
+    # including near the memory max, so separate validation is redundant.
+    memory_max_batch_size = optimal_batch_size
+    throughput_result = None
     validated = False
-    if validate and optimal_batch_size > 2:
+
+    if throughput_profile and device.type == "cuda":
+        throughput_result = _find_throughput_optimal(
+            model, feature_dict, memory_max_batch_size, device, verbose
+        )
+        optimal_batch_size = throughput_result["throughput_optimal_batch_size"]
+        validated = True  # the sweep implicitly validates
+
+        if verbose:
+            print(f"\nMemory-max batch_size: {memory_max_batch_size}")
+            print(f"Throughput-optimal batch_size: {optimal_batch_size}")
+
+    elif validate and optimal_batch_size > 2:
         if verbose:
             print(f"Validating at batch_size={optimal_batch_size}...")
         try:
@@ -379,6 +560,10 @@ def calibrate_batch_size(
         "validated": validated,
     }
 
+    if throughput_result is not None:
+        result["memory_max_batch_size"] = memory_max_batch_size
+        result["throughput"] = throughput_result
+
     if verbose:
         print(f"\nRecommended batch_size: {optimal_batch_size}")
 
@@ -416,6 +601,11 @@ def main():
         help="Output result as JSON (for scripting).",
     )
     parser.add_argument(
+        "--throughput_profile", action="store_true",
+        help="Run throughput sweep to find compute-optimal batch size "
+             "(tests multiple batch sizes and picks the one with best seq/s).",
+    )
+    parser.add_argument(
         "--quiet", action="store_true",
         help="Suppress progress output (implies --json).",
     )
@@ -431,6 +621,7 @@ def main():
         max_batch_size=args.max_batch_size,
         validate=not args.no_validate,
         verbose=verbose,
+        throughput_profile=args.throughput_profile,
     )
 
     if args.json or args.quiet:

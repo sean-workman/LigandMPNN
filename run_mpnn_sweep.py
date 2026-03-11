@@ -526,6 +526,7 @@ Examples:
             model_type=first_exp["model_type"],
             memory_fraction=args.memory_fraction,
             verbose=True,
+            throughput_profile=True,
         )
         optimal_bs = auto_bs_result["batch_size"]
 
@@ -534,6 +535,23 @@ Examples:
         logger.info(f"  Protein: {auto_bs_result['protein_length']} residues")
         logger.info(f"  Base memory: {auto_bs_result['base_memory_mb']:.0f} MB")
         logger.info(f"  Per-sample: {auto_bs_result['per_sample_mb']:.1f} MB")
+
+        if "throughput" in auto_bs_result:
+            tp = auto_bs_result["throughput"]
+            logger.info(f"  Memory-max batch_size: {auto_bs_result['memory_max_batch_size']}")
+            logger.info(f"  Throughput-optimal batch_size: {tp['throughput_optimal_batch_size']}")
+            logger.info(
+                f"  Peak throughput: {tp['peak_throughput_seqs_per_sec']:.1f} seq/s "
+                f"(at B={tp['peak_throughput_batch_size']})"
+            )
+            logger.info(f"  Throughput sweep time: {tp['sweep_time_s']:.1f}s")
+            for pt in tp["sweep_data"]:
+                logger.info(
+                    f"    B={pt['batch_size']:>4d}  "
+                    f"{pt['throughput']:>7.1f} seq/s  "
+                    f"{pt['peak_memory_mb']:>7.0f} MB  "
+                    f"{pt['elapsed_s']:>6.1f}s"
+                )
 
         # Override batch_size in all experiments, adjusting number_of_batches
         # to maintain the same total sequence count
