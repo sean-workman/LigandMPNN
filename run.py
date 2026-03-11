@@ -44,8 +44,9 @@ def main(args) -> None:
         os.makedirs(base_folder, exist_ok=True)
     if not os.path.exists(base_folder + "seqs"):
         os.makedirs(base_folder + "seqs", exist_ok=True)
-    if not os.path.exists(base_folder + "backbones"):
-        os.makedirs(base_folder + "backbones", exist_ok=True)
+    if not args.skip_pdb:
+        if not os.path.exists(base_folder + "backbones"):
+            os.makedirs(base_folder + "backbones", exist_ok=True)
     if not os.path.exists(base_folder + "packed"):
         os.makedirs(base_folder + "packed", exist_ok=True)
     if args.save_stats:
@@ -552,6 +553,17 @@ def main(args) -> None:
                     X_m_stack_list.append(X_m_stack)
                     b_factor_stack_list.append(b_factor_stack)
 
+            # Bulk CPU transfer: move all tensors to numpy once instead of
+            # per-sequence .cpu().numpy() calls (avoids 600K+ individual
+            # GPU→CPU sync points for 100K sequences).
+            S_all_np = S_stack.cpu().numpy()
+            rec_all_np = rec_stack.numpy() if torch.is_tensor(rec_stack) else np.asarray(rec_stack)
+            loss_all_np = loss_stack.cpu().numpy()
+            loss_XY_all_np = loss_XY_stack.cpu().numpy()
+            loss_per_residue_all_np = loss_per_residue_stack.cpu().numpy()
+            # Pre-convert chain masks for FASTA writing (one per chain, small)
+            mask_c_np = [m.cpu().numpy() for m in protein_dict["mask_c"]]
+
             with open(output_fasta, "w") as f:
                 f.write(
                     ">{}, T={}, seed={}, num_res={}, num_ligand_res={}, use_ligand_context={}, ligand_cutoff_distance={}, batch_size={}, number_of_batches={}, model_path={}\n{}\n".format(
@@ -568,57 +580,59 @@ def main(args) -> None:
                         seq_out_str,
                     )
                 )
-                for ix in range(S_stack.shape[0]):
+                n_seqs = S_all_np.shape[0]
+                for ix in range(n_seqs):
                     ix_suffix = ix
                     if not args.zero_indexed:
                         ix_suffix += 1
                     seq_rec_print = np.format_float_positional(
-                        rec_stack[ix].cpu().numpy(), unique=False, precision=4
+                        rec_all_np[ix], unique=False, precision=4
                     )
                     loss_np = np.format_float_positional(
-                        np.exp(-loss_stack[ix].cpu().numpy()), unique=False, precision=4
+                        np.exp(-loss_all_np[ix]), unique=False, precision=4
                     )
                     loss_XY_np = np.format_float_positional(
-                        np.exp(-loss_XY_stack[ix].cpu().numpy()),
+                        np.exp(-loss_XY_all_np[ix]),
                         unique=False,
                         precision=4,
                     )
                     seq = "".join(
-                        [restype_int_to_str[AA] for AA in S_stack[ix].cpu().numpy()]
+                        [restype_int_to_str[AA] for AA in S_all_np[ix]]
                     )
 
                     # write new sequences into PDB with backbone coordinates
-                    seq_prody = np.array([restype_1to3[AA] for AA in list(seq)])[
-                        None,
-                    ].repeat(4, 1)
-                    bfactor_prody = (
-                        loss_per_residue_stack[ix].cpu().numpy()[None, :].repeat(4, 1)
-                    )
-                    backbone.setResnames(seq_prody)
-                    backbone.setBetas(
-                        np.exp(-bfactor_prody)
-                        * (bfactor_prody > 0.01).astype(np.float32)
-                    )
-                    if other_atoms:
-                        writePDB(
-                            output_backbones
-                            + name
-                            + "_"
-                            + str(ix_suffix)
-                            + args.file_ending
-                            + ".pdb",
-                            backbone + other_atoms,
+                    if not args.skip_pdb:
+                        seq_prody = np.array([restype_1to3[AA] for AA in list(seq)])[
+                            None,
+                        ].repeat(4, 1)
+                        bfactor_prody = (
+                            loss_per_residue_all_np[ix][None, :].repeat(4, 1)
                         )
-                    else:
-                        writePDB(
-                            output_backbones
-                            + name
-                            + "_"
-                            + str(ix_suffix)
-                            + args.file_ending
-                            + ".pdb",
-                            backbone,
+                        backbone.setResnames(seq_prody)
+                        backbone.setBetas(
+                            np.exp(-bfactor_prody)
+                            * (bfactor_prody > 0.01).astype(np.float32)
                         )
+                        if other_atoms:
+                            writePDB(
+                                output_backbones
+                                + name
+                                + "_"
+                                + str(ix_suffix)
+                                + args.file_ending
+                                + ".pdb",
+                                backbone + other_atoms,
+                            )
+                        else:
+                            writePDB(
+                                output_backbones
+                                + name
+                                + "_"
+                                + str(ix_suffix)
+                                + args.file_ending
+                                + ".pdb",
+                                backbone,
+                            )
 
                     # write full PDB files
                     if args.pack_side_chains:
@@ -651,11 +665,11 @@ def main(args) -> None:
                     # write fasta lines
                     seq_np = np.array(list(seq))
                     seq_out_str = []
-                    for mask in protein_dict["mask_c"]:
-                        seq_out_str += list(seq_np[mask.cpu().numpy()])
+                    for mask_np_c in mask_c_np:
+                        seq_out_str += list(seq_np[mask_np_c])
                         seq_out_str += [args.fasta_seq_separation]
                     seq_out_str = "".join(seq_out_str)[:-1]
-                    if ix == S_stack.shape[0] - 1:
+                    if ix == n_seqs - 1:
                         # final 2 lines
                         f.write(
                             ">{}, id={}, T={}, seed={}, overall_confidence={}, ligand_confidence={}, seq_rec={}\n{}".format(
@@ -872,6 +886,13 @@ if __name__ == "__main__":
     )
     argparser.add_argument(
         "--save_stats", type=int, default=0, help="Save output statistics"
+    )
+    argparser.add_argument(
+        "--skip_pdb",
+        type=int,
+        default=0,
+        help="Skip writing backbone PDB files (1=skip, 0=write). "
+             "FASTA output is always written.",
     )
 
     argparser.add_argument(

@@ -170,6 +170,7 @@ def build_command(
         "--number_of_batches", str(exp["number_of_batches"]),
         "--seed", str(exp["seed"]),
         "--save_stats", "0",
+        "--skip_pdb", "1",
     ]
 
     # Optional string flags — only added when non-empty
