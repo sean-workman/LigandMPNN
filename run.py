@@ -411,9 +411,13 @@ def main(args) -> None:
             feature_dict["symmetry_residues"] = remapped_symmetry_residues
             feature_dict["symmetry_weights"] = symmetry_weights
 
-            sampling_probs_list = []
-            log_probs_list = []
-            decoding_order_list = []
+            # Only accumulate log_probs/sampling_probs/decoding_order when
+            # saving stats, since they dominate CPU RAM at large sequence counts
+            # (~15 GB each for 500K seqs of 386 residues).
+            if args.save_stats:
+                sampling_probs_list = []
+                log_probs_list = []
+                decoding_order_list = []
             S_list = []
             loss_list = []
             loss_per_residue_list = []
@@ -443,22 +447,28 @@ def main(args) -> None:
                     output_dict["S"], output_dict["log_probs"], combined_mask
                 )
                 # -----
-                S_list.append(output_dict["S"])
-                log_probs_list.append(output_dict["log_probs"])
-                sampling_probs_list.append(output_dict["sampling_probs"])
-                decoding_order_list.append(output_dict["decoding_order"])
-                loss_list.append(loss)
-                loss_per_residue_list.append(loss_per_residue)
-                loss_XY_list.append(loss_XY)
+                # Keep S on GPU if pack_side_chains needs it, otherwise move to CPU
+                if args.pack_side_chains:
+                    S_list.append(output_dict["S"])
+                else:
+                    S_list.append(output_dict["S"].cpu())
+                if args.save_stats:
+                    log_probs_list.append(output_dict["log_probs"].cpu())
+                    sampling_probs_list.append(output_dict["sampling_probs"].cpu())
+                    decoding_order_list.append(output_dict["decoding_order"].cpu())
+                loss_list.append(loss.cpu())
+                loss_per_residue_list.append(loss_per_residue.cpu())
+                loss_XY_list.append(loss_XY.cpu())
             S_stack = torch.cat(S_list, 0)
-            log_probs_stack = torch.cat(log_probs_list, 0)
-            sampling_probs_stack = torch.cat(sampling_probs_list, 0)
-            decoding_order_stack = torch.cat(decoding_order_list, 0)
+            if args.save_stats:
+                log_probs_stack = torch.cat(log_probs_list, 0)
+                sampling_probs_stack = torch.cat(sampling_probs_list, 0)
+                decoding_order_stack = torch.cat(decoding_order_list, 0)
             loss_stack = torch.cat(loss_list, 0)
             loss_per_residue_stack = torch.cat(loss_per_residue_list, 0)
             loss_XY_stack = torch.cat(loss_XY_list, 0)
-            rec_mask = feature_dict["mask"][:1] * feature_dict["chain_mask"][:1]
-            rec_stack = get_seq_rec(feature_dict["S"][:1], S_stack, rec_mask)
+            rec_mask = (feature_dict["mask"][:1] * feature_dict["chain_mask"][:1]).cpu()
+            rec_stack = get_seq_rec(feature_dict["S"][:1].cpu(), S_stack.cpu(), rec_mask)
 
             native_seq = "".join(
                 [restype_int_to_str[AA] for AA in feature_dict["S"][0].cpu().numpy()]
@@ -475,17 +485,17 @@ def main(args) -> None:
             output_packed = base_folder + "/packed/"
             output_stats_path = base_folder + "stats/" + name + args.file_ending + ".pt"
 
-            out_dict = {}
-            out_dict["generated_sequences"] = S_stack.cpu()
-            out_dict["sampling_probs"] = sampling_probs_stack.cpu()
-            out_dict["log_probs"] = log_probs_stack.cpu()
-            out_dict["decoding_order"] = decoding_order_stack.cpu()
-            out_dict["native_sequence"] = feature_dict["S"][0].cpu()
-            out_dict["mask"] = feature_dict["mask"][0].cpu()
-            out_dict["chain_mask"] = feature_dict["chain_mask"][0].cpu()
-            out_dict["seed"] = seed
-            out_dict["temperature"] = args.temperature
             if args.save_stats:
+                out_dict = {}
+                out_dict["generated_sequences"] = S_stack.cpu()
+                out_dict["sampling_probs"] = sampling_probs_stack.cpu()
+                out_dict["log_probs"] = log_probs_stack.cpu()
+                out_dict["decoding_order"] = decoding_order_stack.cpu()
+                out_dict["native_sequence"] = feature_dict["S"][0].cpu()
+                out_dict["mask"] = feature_dict["mask"][0].cpu()
+                out_dict["chain_mask"] = feature_dict["chain_mask"][0].cpu()
+                out_dict["seed"] = seed
+                out_dict["temperature"] = args.temperature
                 torch.save(out_dict, output_stats_path)
 
             if args.pack_side_chains:
