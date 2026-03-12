@@ -22,14 +22,15 @@ CONFIG="./experiment_configs.json"
 
 # --- GENERATE CONFIG ---
 # 48 conditions: 4 noise x 4 temps x 3 biases = 24M total sequences
-# batch_size=50 is a placeholder — auto_batch_size overrides it at runtime
+# batch_size defaults to 1 in the config — run_mpnn_sweep.py --auto_batch_size
+# overrides it with the GPU-calibrated value at runtime and recalculates
+# number_of_batches to preserve the total sequence count (num_seqs).
 echo "=== Generating experiment config ==="
 python "$LIGANDMPNN_DIR/generate_sweep_config.py" \
     --noise 0.02 0.10 0.20 0.30 \
     --temperature 0.1 0.2 0.3 0.4 \
     --bias_AA "" "N:1.5" "N:3.0" \
     --num_seqs 500000 \
-    --batch_size 50 \
     --base_seed 1001 \
     --baseline_group baseline \
     --biased_group asn_bias \
@@ -44,7 +45,6 @@ python "$LIGANDMPNN_DIR/generate_sweep_config.py" \
     --temperature 0.1 0.2 0.3 0.4 \
     --bias_AA "" "N:1.5" "N:3.0" \
     --num_seqs 500000 \
-    --batch_size 50 \
     --preview
 
 echo ""

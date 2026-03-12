@@ -251,8 +251,11 @@ Both can be combined freely with --bias_AA to create the full grid.
         help="Target number of sequences per condition.",
     )
     parser.add_argument(
-        "--batch_size", type=int, required=True,
-        help="Batch size (sequences per batch). Depends on GPU memory and protein size.",
+        "--batch_size", type=int, default=1,
+        help="Batch size (sequences per batch). When using run_mpnn_sweep.py "
+             "with --auto_batch_size, this is overridden by GPU calibration "
+             "and only affects number_of_batches in the config. Default: 1 "
+             "(gives number_of_batches=num_seqs, auto-calibration adjusts both).",
     )
     parser.add_argument(
         "--base_seed", type=int, default=1001,
