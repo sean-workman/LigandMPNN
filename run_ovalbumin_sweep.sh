@@ -2,8 +2,8 @@
 #SBATCH --account=def-caveney-ab
 #SBATCH --job-name=oval_sweep
 #SBATCH --cpus-per-task=16
-#SBATCH --mem=30G
-#SBATCH --time=48:00:00
+#SBATCH --mem=32G
+#SBATCH --time=12:00:00
 #SBATCH --gpus=h100:1
 #SBATCH --nodes=1
 #SBATCH --output=oval_sweep_%j.out
@@ -21,7 +21,7 @@ OUTPUT_BASE="./ovalbumin_sweep_outputs"
 CONFIG="./experiment_configs.json"
 
 # --- GENERATE CONFIG ---
-# 48 conditions: 4 noise x 4 temps x 3 biases = 24M total sequences
+# 48 conditions: 4 noise x 4 temps x 3 biases = 4.8M total sequences
 # batch_size defaults to 1 in the config — run_mpnn_sweep.py --auto_batch_size
 # overrides it with the GPU-calibrated value at runtime and recalculates
 # number_of_batches to preserve the total sequence count (num_seqs).
@@ -30,7 +30,7 @@ python "$LIGANDMPNN_DIR/generate_sweep_config.py" \
     --noise 0.02 0.10 0.20 0.30 \
     --temperature 0.1 0.2 0.3 0.4 \
     --bias_AA "" "N:1.5" "N:3.0" \
-    --num_seqs 500000 \
+    --num_seqs 100000 \
     --base_seed 1001 \
     --baseline_group baseline \
     --biased_group asn_bias \
@@ -44,7 +44,7 @@ python "$LIGANDMPNN_DIR/generate_sweep_config.py" \
     --noise 0.02 0.10 0.20 0.30 \
     --temperature 0.1 0.2 0.3 0.4 \
     --bias_AA "" "N:1.5" "N:3.0" \
-    --num_seqs 500000 \
+    --num_seqs 100000 \
     --preview
 
 echo ""
