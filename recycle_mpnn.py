@@ -643,6 +643,12 @@ Example:
                         help="Sequences per round (default: 1000000)")
     parser.add_argument("--batch_size", type=int, default=1000,
                         help="Batch size for LigandMPNN (default: 1000)")
+    parser.add_argument("--auto_batch_size", action="store_true",
+                        help="Auto-calibrate batch size to fit GPU memory "
+                             "(overrides --batch_size)")
+    parser.add_argument("--memory_fraction", type=float, default=0.85,
+                        help="Fraction of GPU VRAM to target when using "
+                             "--auto_batch_size (default: 0.85)")
     parser.add_argument("--seed", type=int, default=42,
                         help="Base seed, incremented per round (default: 42)")
     parser.add_argument("--max_rounds", type=int, default=50,
@@ -667,6 +673,43 @@ Example:
         format="%(asctime)s [%(levelname)s] %(message)s",
         datefmt="%H:%M:%S",
     )
+
+    # Auto-calibrate batch size if requested
+    if args.auto_batch_size:
+        from auto_batch_size import calibrate_batch_size
+
+        model_params_dir = os.path.join(args.ligandmpnn_dir, "model_params")
+        checkpoint_path = resolve_checkpoint(
+            args.model_type, args.noise, model_params_dir
+        )
+
+        logger.info("=" * 70)
+        logger.info("Auto batch size calibration")
+        logger.info(f"  Memory target: {args.memory_fraction:.0%} of GPU VRAM")
+
+        auto_bs_result = calibrate_batch_size(
+            pdb_path=os.path.abspath(args.pdb),
+            checkpoint_path=checkpoint_path,
+            model_type=args.model_type,
+            memory_fraction=args.memory_fraction,
+            verbose=True,
+            throughput_profile=True,
+        )
+        args.batch_size = auto_bs_result["batch_size"]
+
+        logger.info(f"  Calibrated batch_size: {args.batch_size}")
+        logger.info(f"  GPU: {auto_bs_result['gpu_name']}")
+        logger.info(f"  Protein: {auto_bs_result['protein_length']} residues")
+        logger.info(f"  Base memory: {auto_bs_result['base_memory_mb']:.0f} MB")
+        logger.info(f"  Per-sample: {auto_bs_result['per_sample_mb']:.1f} MB")
+
+        if "throughput" in auto_bs_result:
+            tp = auto_bs_result["throughput"]
+            logger.info(f"  Throughput-optimal batch_size: "
+                        f"{tp['throughput_optimal_batch_size']}")
+            logger.info(f"  Peak throughput: "
+                        f"{tp['peak_throughput_seqs_per_sec']:.1f} seq/s")
+        logger.info("=" * 70)
 
     recycle(
         pdb_path=args.pdb,

@@ -35,7 +35,8 @@ python "$LIGANDMPNN_DIR/recycle_mpnn.py" \
     --temperature 0.1 \
     --bias_AA "N:3.0" \
     --num_seqs 1000000 \
-    --batch_size 1000 \
+    --auto_batch_size \
+    --memory_fraction 0.85 \
     --max_rounds 50 \
     --patience 5 \
     --target_coverage 1.0 \
