@@ -174,7 +174,7 @@ def parse_mpnn_fasta(fasta_path: str) -> List[Tuple[str, str, dict]]:
 def compute_positional_coverage(
     sequence: str,
     length_sets: Dict[int, Set[str]],
-) -> Tuple[float, int, int, int]:
+) -> Tuple[float, int, int, int, np.ndarray]:
     """
     Compute 1x positional coverage of a sequence against the peptide library.
 
@@ -200,6 +200,8 @@ def compute_positional_coverage(
         Total positions in the sequence.
     n_peptide_hits : int
         Number of distinct library peptides found as substrings.
+    covered : np.ndarray
+        Boolean array of per-position coverage.
     """
     seq_len = len(sequence)
     # Boolean array: is position i covered by at least one library peptide?
@@ -221,7 +223,7 @@ def compute_positional_coverage(
 
     n_covered = int(covered.sum())
     coverage = n_covered / seq_len if seq_len > 0 else 0.0
-    return coverage, n_covered, seq_len, n_hits
+    return coverage, n_covered, seq_len, n_hits, covered
 
 
 # ── Per-condition processing ───────────────────────────────────────────────
@@ -268,6 +270,7 @@ class SeqResult:
     n_peptide_hits: int
     overall_confidence: float = 0.0
     seq_recovery: float = 0.0
+    sequence: str = ""
 
 
 def process_condition(
@@ -292,7 +295,7 @@ def process_condition(
     n_total = len(entries)
 
     for ix, (seq_id, sequence, meta) in enumerate(entries):
-        cov, n_cov, n_tot, n_hits = compute_positional_coverage(
+        cov, n_cov, n_tot, n_hits, _covered_arr = compute_positional_coverage(
             sequence, length_sets,
         )
 
@@ -304,6 +307,7 @@ def process_condition(
             n_peptide_hits=n_hits,
             overall_confidence=float(meta.get("overall_confidence", 0)),
             seq_recovery=float(meta.get("seq_rec", 0)),
+            sequence=sequence,
         )
 
         if seq_id == "native":
