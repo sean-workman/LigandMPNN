@@ -97,11 +97,51 @@ def longest_contiguous_covered(covered: np.ndarray) -> tuple:
     return (int(starts[best_idx]), int(ends[best_idx]), int(lengths[best_idx]))
 
 
+def contiguous_block_from_position(covered: np.ndarray, start_pos: int) -> tuple:
+    """
+    Find the contiguous run of True values starting at start_pos.
+
+    Returns (start, end_exclusive, length).  If covered[start_pos] is False,
+    returns (start_pos, start_pos, 0).
+    """
+    if start_pos >= len(covered) or not covered[start_pos]:
+        return (start_pos, start_pos, 0)
+    end = start_pos
+    while end < len(covered) and covered[end]:
+        end += 1
+    return (start_pos, end, end - start_pos)
+
+
+def trim_to_contiguous_block(covered: np.ndarray, growth_mode: str) -> np.ndarray:
+    """
+    Keep only the relevant contiguous block, zeroing everything else.
+
+    Parameters
+    ----------
+    covered : boolean array
+    growth_mode : str
+        "none"  — keep the longest contiguous block (wherever it is).
+        "n_terminal" — keep only the contiguous block starting at position 1
+                       (skip Met at position 0).
+
+    Returns a new boolean array.
+    """
+    result = np.zeros_like(covered)
+    if growth_mode == "n_terminal":
+        start, end, length = contiguous_block_from_position(covered, 1)
+    else:
+        start, end, length = longest_contiguous_covered(covered)
+    if length > 0:
+        result[start:end] = True
+    return result
+
+
 def select_best_sequence(
     fasta_path: str,
     length_sets: dict,
     cumulative_covered: np.ndarray,
     metric: str = "total_coverage",
+    growth_mode: str = "none",
 ) -> tuple:
     """
     Score all designed sequences and select the best one.
@@ -113,10 +153,15 @@ def select_best_sequence(
     length_sets : dict
         Peptide library grouped by length.
     cumulative_covered : np.ndarray
-        Boolean array of positions already covered in previous rounds.
+        Boolean array of positions already covered in previous rounds
+        (already trimmed to the relevant contiguous block).
     metric : str
         "total_coverage" — maximize union of cumulative + new coverage.
         "longest_contiguous" — maximize longest contiguous covered block.
+        Ignored when growth_mode is "n_terminal".
+    growth_mode : str
+        "none" — use metric as-is.
+        "n_terminal" — score by length of contiguous block from position 1.
 
     Returns
     -------
@@ -146,11 +191,21 @@ def select_best_sequence(
         # Compute union with cumulative
         union = cumulative_covered | covered
         union_count = int(union.sum())
+        new_positions = int(covered.sum()) - int((cumulative_covered & covered).sum())
+        confidence = float(meta.get("overall_confidence", 0))
 
-        if metric == "total_coverage":
+        if growth_mode == "n_terminal":
+            # Score = length of contiguous block from position 1 in the union
+            _, _, nt_len = contiguous_block_from_position(union, 1)
+            score = nt_len
+            is_better = (
+                score > best_score
+                or (score == best_score and new_positions > best_new_positions)
+                or (score == best_score and new_positions == best_new_positions
+                    and confidence > best_confidence)
+            )
+        elif metric == "total_coverage":
             score = union_count
-            new_positions = int(covered.sum()) - int((cumulative_covered & covered).sum())
-            confidence = float(meta.get("overall_confidence", 0))
             # Tiebreak: more new positions, then higher confidence
             is_better = (
                 score > best_score
@@ -161,8 +216,6 @@ def select_best_sequence(
         elif metric == "longest_contiguous":
             _, _, longest = longest_contiguous_covered(union)
             score = longest
-            new_positions = int(covered.sum()) - int((cumulative_covered & covered).sum())
-            confidence = float(meta.get("overall_confidence", 0))
             is_better = (
                 score > best_score
                 or (score == best_score and union_count > best_new_positions)
@@ -174,7 +227,7 @@ def select_best_sequence(
             best_sequence = sequence
             best_covered = covered
             best_score = score
-            best_new_positions = new_positions if metric == "total_coverage" else union_count
+            best_new_positions = new_positions if metric != "longest_contiguous" else union_count
             best_confidence = confidence
             best_seq_id = seq_id
 
@@ -260,7 +313,7 @@ def run_ligandmpnn(
 
 # ── Resume from checkpoint ────────────────────────────────────────────────
 
-def _try_resume(output_dir, length_sets, seq_len):
+def _try_resume(output_dir, length_sets, seq_len, growth_mode="none"):
     """
     Attempt to resume a previous run from saved artifacts.
 
@@ -317,6 +370,9 @@ def _try_resume(output_dir, length_sets, seq_len):
         cumulative_covered |= covered
         best_sequence = seq
 
+    # Trim to contiguous block (matching the growth_mode used for this run)
+    cumulative_covered = trim_to_contiguous_block(cumulative_covered, growth_mode)
+
     # Restore round_results up to last_complete
     round_results = [r for r in saved_rounds if r["round"] <= last_complete]
 
@@ -338,7 +394,8 @@ def _save_and_return(output_dir, pdb_path, library_path, model_type, noise,
                      temperature, bias_AA, num_seqs, batch_size, seed,
                      selection_metric, x_mode, target_coverage, patience,
                      max_rounds, lib_stats, round_results, best_sequence,
-                     cumulative_covered, seq_len, residue_ids):
+                     cumulative_covered, seq_len, residue_ids,
+                     growth_mode="none"):
     """Save final artifacts and return the progression dict."""
     coverage_frac = cumulative_covered.mean()
     new_total = int(cumulative_covered.sum())
@@ -359,6 +416,7 @@ def _save_and_return(output_dir, pdb_path, library_path, model_type, noise,
             "target_coverage": target_coverage,
             "patience": patience,
             "max_rounds": max_rounds,
+            "growth_mode": growth_mode,
         },
         "library_stats": lib_stats,
         "rounds": round_results,
@@ -400,6 +458,7 @@ def recycle(
     patience: int,
     x_mode: str,
     selection_metric: str,
+    growth_mode: str = "none",
 ) -> dict:
     """
     Run the iterative coverage recycling protocol.
@@ -420,7 +479,7 @@ def recycle(
     logger.info(f"PDB has {seq_len} residues")
 
     # Try to resume from a previous run
-    resumed = _try_resume(output_dir, length_sets, seq_len)
+    resumed = _try_resume(output_dir, length_sets, seq_len, growth_mode)
     if resumed is not None:
         start_round = resumed["start_round"]
         cumulative_covered = resumed["cumulative_covered"]
@@ -442,7 +501,7 @@ def recycle(
                                     seed, selection_metric, x_mode, target_coverage,
                                     patience, max_rounds, lib_stats, round_results,
                                     best_sequence, cumulative_covered, seq_len,
-                                    residue_ids)
+                                    residue_ids, growth_mode=growth_mode)
         if rounds_without_improvement >= patience:
             logger.info(f"Patience already exhausted — nothing to do")
             return _save_and_return(output_dir, pdb_path, library_path, model_type,
@@ -450,7 +509,7 @@ def recycle(
                                     seed, selection_metric, x_mode, target_coverage,
                                     patience, max_rounds, lib_stats, round_results,
                                     best_sequence, cumulative_covered, seq_len,
-                                    residue_ids)
+                                    residue_ids, growth_mode=growth_mode)
     else:
         start_round = 0
         cumulative_covered = np.zeros(seq_len, dtype=bool)
@@ -507,6 +566,7 @@ def recycle(
         t0 = time.time()
         seq, covered_arr, score, seq_id = select_best_sequence(
             fasta_path, length_sets, cumulative_covered, selection_metric,
+            growth_mode=growth_mode,
         )
         scoring_time = time.time() - t0
         logger.info(f"  Scoring completed in {scoring_time:.0f}s")
@@ -515,14 +575,17 @@ def recycle(
             logger.error("No valid sequences found — stopping")
             break
 
-        # Update cumulative coverage
-        new_covered = covered_arr & ~cumulative_covered
-        n_new = int(new_covered.sum())
-        cumulative_covered |= covered_arr
+        # Update cumulative coverage — OR in new coverage, then trim to the
+        # relevant contiguous block (scattered positions aren't fixed so
+        # tracking them would inflate scores)
+        prev_total = int(cumulative_covered.sum())
+        raw_union = cumulative_covered | covered_arr
+        cumulative_covered = trim_to_contiguous_block(raw_union, growth_mode)
         new_total = int(cumulative_covered.sum())
+        n_new = new_total - prev_total
         coverage_frac = cumulative_covered.mean()
 
-        # Contiguous coverage info
+        # Contiguous coverage info (after trimming, this IS the block)
         cont_start, cont_end, cont_len = longest_contiguous_covered(cumulative_covered)
 
         best_sequence = seq
@@ -588,6 +651,7 @@ def recycle(
                 "target_coverage": target_coverage,
                 "patience": patience,
                 "max_rounds": max_rounds,
+                "growth_mode": growth_mode,
             },
             "library_stats": lib_stats,
             "rounds": round_results,
@@ -608,7 +672,7 @@ def recycle(
                             seed, selection_metric, x_mode, target_coverage,
                             patience, max_rounds, lib_stats, round_results,
                             best_sequence, cumulative_covered, seq_len,
-                            residue_ids)
+                            residue_ids, growth_mode=growth_mode)
 
 
 # ── CLI ───────────────────────────────────────────────────────────────────
@@ -664,6 +728,12 @@ Example:
                         default="total_coverage",
                         help="Metric for selecting best sequence per round "
                              "(default: total_coverage)")
+    parser.add_argument("--growth_mode",
+                        choices=["none", "n_terminal"],
+                        default="none",
+                        help="'none': fix longest contiguous block; "
+                             "'n_terminal': grow from position 1, skipping Met "
+                             "(default: none)")
     parser.add_argument("--ligandmpnn_dir", default=DEFAULT_LIGANDMPNN_DIR,
                         help="Path to LigandMPNN repository")
     args = parser.parse_args()
@@ -728,6 +798,7 @@ Example:
         patience=args.patience,
         x_mode=args.x_mode,
         selection_metric=args.selection_metric,
+        growth_mode=args.growth_mode,
     )
 
 
