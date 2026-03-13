@@ -258,6 +258,129 @@ def run_ligandmpnn(
     return fa_files[0]
 
 
+# ── Resume from checkpoint ────────────────────────────────────────────────
+
+def _try_resume(output_dir, length_sets, seq_len):
+    """
+    Attempt to resume a previous run from saved artifacts.
+
+    Scans output_dir for completed rounds (those with both
+    best_sequence.fasta and coverage_summary.json).  Reconstructs
+    cumulative_covered by re-scoring each round's best sequence against the
+    library — fast (<1 ms per sequence) and avoids persisting the boolean
+    array.
+
+    Returns
+    -------
+    dict with keys: start_round, cumulative_covered, best_sequence,
+    round_results, rounds_without_improvement, prev_coverage_count.
+    Returns None if no checkpoint is found.
+    """
+    progression_path = os.path.join(output_dir, "progression.json")
+    if not os.path.exists(progression_path):
+        return None
+
+    with open(progression_path) as f:
+        progression = json.load(f)
+
+    saved_rounds = progression.get("rounds", [])
+    if not saved_rounds:
+        return None
+
+    # Find the last fully completed round (both artifacts present)
+    last_complete = -1
+    for rinfo in saved_rounds:
+        rnum = rinfo["round"]
+        rdir = os.path.join(output_dir, f"round_{rnum:03d}")
+        fasta_ok = os.path.exists(os.path.join(rdir, "best_sequence.fasta"))
+        json_ok = os.path.exists(os.path.join(rdir, "coverage_summary.json"))
+        if fasta_ok and json_ok:
+            last_complete = rnum
+        else:
+            break  # stop at first incomplete round
+
+    if last_complete < 0:
+        return None
+
+    # Reconstruct cumulative_covered by re-scoring each round's best seq
+    cumulative_covered = np.zeros(seq_len, dtype=bool)
+    best_sequence = None
+
+    for rnum in range(last_complete + 1):
+        rdir = os.path.join(output_dir, f"round_{rnum:03d}")
+        fasta_file = os.path.join(rdir, "best_sequence.fasta")
+        with open(fasta_file) as f:
+            lines = f.readlines()
+        # Second line is the sequence
+        seq = lines[1].strip()
+        _, _, _, _, covered = compute_positional_coverage(seq, length_sets)
+        cumulative_covered |= covered
+        best_sequence = seq
+
+    # Restore round_results up to last_complete
+    round_results = [r for r in saved_rounds if r["round"] <= last_complete]
+
+    last_info = round_results[-1]
+    rounds_without_improvement = last_info.get("rounds_without_improvement", 0)
+    prev_coverage_count = last_info.get("cumulative_covered", 0)
+
+    return {
+        "start_round": last_complete + 1,
+        "cumulative_covered": cumulative_covered,
+        "best_sequence": best_sequence,
+        "round_results": round_results,
+        "rounds_without_improvement": rounds_without_improvement,
+        "prev_coverage_count": prev_coverage_count,
+    }
+
+
+def _save_and_return(output_dir, pdb_path, library_path, model_type, noise,
+                     temperature, bias_AA, num_seqs, batch_size, seed,
+                     selection_metric, x_mode, target_coverage, patience,
+                     max_rounds, lib_stats, round_results, best_sequence,
+                     cumulative_covered, seq_len, residue_ids):
+    """Save final artifacts and return the progression dict."""
+    coverage_frac = cumulative_covered.mean()
+    new_total = int(cumulative_covered.sum())
+
+    progression = {
+        "pdb": os.path.abspath(pdb_path),
+        "library": os.path.abspath(library_path),
+        "parameters": {
+            "model_type": model_type,
+            "noise": noise,
+            "temperature": temperature,
+            "bias_AA": bias_AA,
+            "num_seqs": num_seqs,
+            "batch_size": batch_size,
+            "base_seed": seed,
+            "selection_metric": selection_metric,
+            "x_mode": x_mode,
+            "target_coverage": target_coverage,
+            "patience": patience,
+            "max_rounds": max_rounds,
+        },
+        "library_stats": lib_stats,
+        "rounds": round_results,
+    }
+    with open(os.path.join(output_dir, "progression.json"), "w") as f:
+        json.dump(progression, f, indent=2)
+
+    if best_sequence is not None:
+        with open(os.path.join(output_dir, "final_sequence.fasta"), "w") as f:
+            f.write(f">final_sequence coverage={coverage_frac:.4f} "
+                    f"rounds={len(round_results)}\n{best_sequence}\n")
+
+    logger.info(f"\n{'='*70}")
+    logger.info(f"RECYCLING COMPLETE")
+    logger.info(f"  Rounds: {len(round_results)}")
+    logger.info(f"  Final coverage: {new_total}/{seq_len} ({coverage_frac*100:.1f}%)")
+    logger.info(f"  Results: {output_dir}")
+    logger.info(f"{'='*70}")
+
+    return progression
+
+
 # ── Main recycling loop ──────────────────────────────────────────────────
 
 def recycle(
@@ -296,14 +419,47 @@ def recycle(
     seq_len = len(residue_ids)
     logger.info(f"PDB has {seq_len} residues")
 
-    # State
-    cumulative_covered = np.zeros(seq_len, dtype=bool)
-    best_sequence = None
-    round_results = []
-    rounds_without_improvement = 0
-    prev_coverage_count = 0
+    # Try to resume from a previous run
+    resumed = _try_resume(output_dir, length_sets, seq_len)
+    if resumed is not None:
+        start_round = resumed["start_round"]
+        cumulative_covered = resumed["cumulative_covered"]
+        best_sequence = resumed["best_sequence"]
+        round_results = resumed["round_results"]
+        rounds_without_improvement = resumed["rounds_without_improvement"]
+        prev_coverage_count = resumed["prev_coverage_count"]
+        logger.info(f"RESUMED from checkpoint — {start_round} rounds completed")
+        logger.info(f"  Cumulative coverage: {cumulative_covered.sum()}/{seq_len} "
+                     f"({cumulative_covered.mean()*100:.1f}%)")
+        logger.info(f"  Rounds without improvement: {rounds_without_improvement}")
 
-    for round_num in range(max_rounds):
+        # Check if already converged before resuming
+        coverage_frac = cumulative_covered.mean()
+        if coverage_frac >= target_coverage:
+            logger.info(f"Target coverage already reached — nothing to do")
+            return _save_and_return(output_dir, pdb_path, library_path, model_type,
+                                    noise, temperature, bias_AA, num_seqs, batch_size,
+                                    seed, selection_metric, x_mode, target_coverage,
+                                    patience, max_rounds, lib_stats, round_results,
+                                    best_sequence, cumulative_covered, seq_len,
+                                    residue_ids)
+        if rounds_without_improvement >= patience:
+            logger.info(f"Patience already exhausted — nothing to do")
+            return _save_and_return(output_dir, pdb_path, library_path, model_type,
+                                    noise, temperature, bias_AA, num_seqs, batch_size,
+                                    seed, selection_metric, x_mode, target_coverage,
+                                    patience, max_rounds, lib_stats, round_results,
+                                    best_sequence, cumulative_covered, seq_len,
+                                    residue_ids)
+    else:
+        start_round = 0
+        cumulative_covered = np.zeros(seq_len, dtype=bool)
+        best_sequence = None
+        round_results = []
+        rounds_without_improvement = 0
+        prev_coverage_count = 0
+
+    for round_num in range(start_round, max_rounds):
         round_dir = os.path.join(output_dir, f"round_{round_num:03d}")
         mpnn_output_dir = os.path.join(round_dir, "mpnn_output")
         os.makedirs(round_dir, exist_ok=True)
@@ -447,20 +603,12 @@ def recycle(
             logger.info(f"\nNo improvement for {patience} rounds — stopping (patience)")
             break
 
-    # Save final sequence
-    if best_sequence is not None:
-        with open(os.path.join(output_dir, "final_sequence.fasta"), "w") as f:
-            f.write(f">final_sequence coverage={coverage_frac:.4f} "
-                    f"rounds={round_num+1}\n{best_sequence}\n")
-
-    logger.info(f"\n{'='*70}")
-    logger.info(f"RECYCLING COMPLETE")
-    logger.info(f"  Rounds: {len(round_results)}")
-    logger.info(f"  Final coverage: {new_total}/{seq_len} ({coverage_frac*100:.1f}%)")
-    logger.info(f"  Results: {output_dir}")
-    logger.info(f"{'='*70}")
-
-    return progression
+    return _save_and_return(output_dir, pdb_path, library_path, model_type,
+                            noise, temperature, bias_AA, num_seqs, batch_size,
+                            seed, selection_metric, x_mode, target_coverage,
+                            patience, max_rounds, lib_stats, round_results,
+                            best_sequence, cumulative_covered, seq_len,
+                            residue_ids)
 
 
 # ── CLI ───────────────────────────────────────────────────────────────────
