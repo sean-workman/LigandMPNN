@@ -5,7 +5,7 @@ recycle_mpnn.py — Iterative coverage recycling protocol for LigandMPNN.
 Generates sequences with LigandMPNN, scores peptide library coverage, fixes
 covered positions (by threading the best designed sequence onto the backbone
 PDB), and redesigns uncovered positions in subsequent rounds.  Repeats until
-target coverage is reached, patience is exhausted, or max rounds is hit.
+target coverage is reached or max rounds is hit.
 
 Usage:
     python recycle_mpnn.py \
@@ -392,7 +392,7 @@ def _try_resume(output_dir, length_sets, seq_len, growth_mode="none"):
 
 def _save_and_return(output_dir, pdb_path, library_path, model_type, noise,
                      temperature, bias_AA, num_seqs, batch_size, seed,
-                     selection_metric, x_mode, target_coverage, patience,
+                     selection_metric, x_mode, target_coverage,
                      max_rounds, lib_stats, round_results, best_sequence,
                      cumulative_covered, seq_len, residue_ids,
                      growth_mode="none"):
@@ -414,7 +414,6 @@ def _save_and_return(output_dir, pdb_path, library_path, model_type, noise,
             "selection_metric": selection_metric,
             "x_mode": x_mode,
             "target_coverage": target_coverage,
-            "patience": patience,
             "max_rounds": max_rounds,
             "growth_mode": growth_mode,
         },
@@ -455,7 +454,6 @@ def recycle(
     seed: int,
     max_rounds: int,
     target_coverage: float,
-    patience: int,
     x_mode: str,
     selection_metric: str,
     growth_mode: str = "none",
@@ -499,15 +497,6 @@ def recycle(
             return _save_and_return(output_dir, pdb_path, library_path, model_type,
                                     noise, temperature, bias_AA, num_seqs, batch_size,
                                     seed, selection_metric, x_mode, target_coverage,
-                                    patience, max_rounds, lib_stats, round_results,
-                                    best_sequence, cumulative_covered, seq_len,
-                                    residue_ids, growth_mode=growth_mode)
-        if rounds_without_improvement >= patience:
-            logger.info(f"Patience already exhausted — nothing to do")
-            return _save_and_return(output_dir, pdb_path, library_path, model_type,
-                                    noise, temperature, bias_AA, num_seqs, batch_size,
-                                    seed, selection_metric, x_mode, target_coverage,
-                                    patience, max_rounds, lib_stats, round_results,
                                     best_sequence, cumulative_covered, seq_len,
                                     residue_ids, growth_mode=growth_mode)
     else:
@@ -649,7 +638,6 @@ def recycle(
                 "selection_metric": selection_metric,
                 "x_mode": x_mode,
                 "target_coverage": target_coverage,
-                "patience": patience,
                 "max_rounds": max_rounds,
                 "growth_mode": growth_mode,
             },
@@ -663,14 +651,10 @@ def recycle(
         if coverage_frac >= target_coverage:
             logger.info(f"\nTarget coverage {target_coverage*100:.0f}% REACHED!")
             break
-        if rounds_without_improvement >= patience:
-            logger.info(f"\nNo improvement for {patience} rounds — stopping (patience)")
-            break
-
     return _save_and_return(output_dir, pdb_path, library_path, model_type,
                             noise, temperature, bias_AA, num_seqs, batch_size,
                             seed, selection_metric, x_mode, target_coverage,
-                            patience, max_rounds, lib_stats, round_results,
+                            max_rounds, lib_stats, round_results,
                             best_sequence, cumulative_covered, seq_len,
                             residue_ids, growth_mode=growth_mode)
 
@@ -719,8 +703,6 @@ Example:
                         help="Maximum number of rounds (default: 50)")
     parser.add_argument("--target_coverage", type=float, default=1.0,
                         help="Stop when this coverage fraction is reached (default: 1.0)")
-    parser.add_argument("--patience", type=int, default=5,
-                        help="Rounds without improvement before stopping (default: 5)")
     parser.add_argument("--x_mode", choices=["replace", "exclude"], default="replace",
                         help="How to handle X in library peptides (default: replace)")
     parser.add_argument("--selection_metric",
@@ -795,7 +777,6 @@ Example:
         seed=args.seed,
         max_rounds=args.max_rounds,
         target_coverage=args.target_coverage,
-        patience=args.patience,
         x_mode=args.x_mode,
         selection_metric=args.selection_metric,
         growth_mode=args.growth_mode,

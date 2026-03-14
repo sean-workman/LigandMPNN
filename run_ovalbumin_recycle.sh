@@ -38,7 +38,6 @@ python "$LIGANDMPNN_DIR/recycle_mpnn.py" \
     --auto_batch_size \
     --memory_fraction 0.85 \
     --max_rounds 50 \
-    --patience 5 \
     --target_coverage 1.0 \
     --selection_metric total_coverage \
     --growth_mode n_terminal
