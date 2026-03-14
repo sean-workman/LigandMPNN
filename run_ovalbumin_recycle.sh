@@ -37,7 +37,6 @@ python "$LIGANDMPNN_DIR/recycle_mpnn.py" \
     --num_seqs 1000000 \
     --batch_size 1000 \
     --max_rounds 50 \
-    --patience 5 \
     --target_coverage 1.0 \
     --selection_metric total_coverage
 
